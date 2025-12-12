@@ -80,7 +80,7 @@ Date: Fri Dec 12 16:30:00 CET 2025
     Config Object: set-legacy-worker
     Profile: Old
 ...
-
+```
 ## 📚 Background & References
 
 OpenShift allows configuring TLS Security Profiles to balance between security and compatibility. This script helps verify these settings against industry standards.
