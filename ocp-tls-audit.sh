@@ -1,8 +1,9 @@
 #!/bin/bash
 # ===================================================================================
-# OpenShift Dynamic Security Profile & Certificate Audit (V10)
+# OpenShift Dynamic TLS & Certificate Audit (V11.2 - Service Mesh Hardened)
 # Created by Chris Tawfik (ctawfik@redhat.com) | toughIQ (toughiq@gmail.com)
 # with support from Gemini AI
+# Updates: Section [3] logic enhanced for clean Service Mesh detection using printf.
 # ===================================================================================
 
 # Colors
@@ -18,7 +19,7 @@ command -v oc >/dev/null 2>&1 || { echo -e "${RED}Error: 'oc' client not found.$
 command -v jq >/dev/null 2>&1 || { echo -e "${RED}Error: 'jq' not found.${RESET}"; exit 1; }
 command -v openssl >/dev/null 2>&1 || { echo -e "${RED}Error: 'openssl' not found.${RESET}"; exit 1; }
 
-echo -e "${BOLD}Starting OpenShift TLS Audit...${RESET}"
+echo -e "${BOLD}Starting OpenShift TLS Audit (Service Mesh Ready)...${RESET}"
 echo "Cluster: $(oc whoami --show-server)"
 echo "Date: $(date)"
 echo "-----------------------------------------------------------------------------------"
@@ -82,7 +83,7 @@ fi
 # ===================================================================================
 # [2] INGRESS CONTROLLER
 # ===================================================================================
-echo -e "\n${BOLD}[2] Component: Ingress Controller${RESET}"
+echo -e "\n${BOLD}[2] Component: OpenShift Ingress Controller${RESET}"
 oc get ingresscontrollers -n openshift-ingress-operator -o json | jq -c '.items[]' | while read -r ic; do
     IC_NAME=$(echo "$ic" | jq -r '.metadata.name')
     SPEC_PROFILE=$(echo "$ic" | jq -r '.spec.tlsSecurityProfile.type // "Intermediate (Default)"')
@@ -117,9 +118,54 @@ oc get ingresscontrollers -n openshift-ingress-operator -o json | jq -c '.items[
 done
 
 # ===================================================================================
-# [3] KUBELET
+# [3] SERVICE MESH (ISTIO) GATEWAYS
 # ===================================================================================
-echo -e "\n${BOLD}[3] Component: Kubelet (Node Pools)${RESET}"
+echo -e "\n${BOLD}[3] Component: Service Mesh (Istio) Gateways${RESET}"
+
+# Attempt to find the namespace of the ServiceMeshControlPlane (OSSM)
+SERVICE_MESH_NS=$(oc get servicemeshcontrolplane -A -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null)
+GATEWAY_COUNT=$(oc get gateway -A --no-headers 2>/dev/null | wc -l)
+
+if [ ! -z "$SERVICE_MESH_NS" ]; then
+    # --- OSSM Control Plane Found ---
+    printf "  Result: %bService Mesh Control Plane gefunden in Namespace: %s%b\n" "$YELLOW" "$SERVICE_MESH_NS" "$RESET"
+    
+    # Check for active Istio Gateways
+    oc get gateway -n "$SERVICE_MESH_NS" -o json | jq -c '.items[]' | while read -r gw; do
+        GW_NAME=$(echo "$gw" | jq -r '.metadata.name')
+        GW_HOSTS=$(echo "$gw" | jq -r '.spec.servers[] | "\(.hosts | join(", "))"' | sort | uniq)
+        GW_MODES=$(echo "$gw" | jq -r '.spec.servers[] | "\(.tls.mode // "NONE")"' | sort | uniq)
+
+        echo -e "  Gateway Name: ${BOLD}$GW_NAME${RESET} (Namespace: $SERVICE_MESH_NS)"
+        echo "    Hosts: $GW_HOSTS"
+        
+        # Audit TLS Modes
+        if echo "$GW_MODES" | grep -q "SIMPLE"; then
+            printf "    TLS Mode: %bSIMPLE/PASSTHROUGH%b (Externes TLS terminated)\n" "$GREEN" "$RESET"
+        elif echo "$GW_MODES" | grep -q "MUTUAL" || echo "$GW_MODES" | grep -q "ISTIO_MUTUAL"; then
+            printf "    TLS Mode: %bMUTUAL/mTLS%b (Empfohlen)\n" "$GREEN" "$RESET"
+        else
+            printf "    TLS Mode: %b%s%b (WARNUNG: Auf reines HTTP oder fehlendes TLS prüfen)\n" "$RED" "$GW_MODES" "$RESET"
+        fi
+        
+        echo "    Hinweis: Cipher Suites werden vom ServiceMeshControlPlane oder Proxy Settings geerbt/gesteuert."
+        echo "  ---"
+    done
+elif [ "$GATEWAY_COUNT" -gt 0 ]; then
+    # --- Raw Istio Gateways Found (No SMCP) ---
+    printf "  %bWarnung: Keine Service Mesh Control Plane (SMCP) gefunden, aber %s rohe Istio Gateway Objekte erkannt.%b\n" "$YELLOW" "$GATEWAY_COUNT" "$RESET"
+    echo "  Dies können manuelle/externe Istio-Installationen oder verwaiste Objekte sein."
+    echo "  Bitte prüfen Sie deren Einstellungen manuell auf unsichere TLS-Modi mit 'oc get gateway -A -o yaml'."
+else
+    # --- Nothing Found ---
+    printf "  Result: %bService Mesh (Istio/OSSM) Komponenten nicht erkannt. Überspringe Gateway-Prüfung.%b\n" "$GREEN" "$RESET"
+fi
+
+
+# ===================================================================================
+# [4] KUBELET
+# ===================================================================================
+echo -e "\n${BOLD}[4] Component: Kubelet (Node Pools)${RESET}"
 KC_DUMP=$(oc get kubeletconfig -o json 2>/dev/null)
 
 oc get mcp -o json | jq -c '.items[]' | while read mcp; do
@@ -149,10 +195,10 @@ oc get mcp -o json | jq -c '.items[]' | while read mcp; do
 done
 
 # ===================================================================================
-# [4] REFERENCE SECTION
+# [5] REFERENCE SECTION
 # ===================================================================================
 echo -e "\n-----------------------------------------------------------------------------------"
-echo -e "${BOLD}[4] Reference: Standard Profile Definitions (Cluster Version Defaults)${RESET}"
+echo -e "${BOLD}[5] Reference: Standard Profile Definitions (Cluster Version Defaults)${RESET}"
 echo "Definitions fetched dynamically via 'oc explain' for your current OCP version."
 
 for type in "Intermediate" "Modern" "Old"; do
@@ -173,10 +219,10 @@ for type in "Intermediate" "Modern" "Old"; do
 done
 
 # ===================================================================================
-# [5] CERTIFICATES
+# [6] CERTIFICATES
 # ===================================================================================
 echo -e "\n-----------------------------------------------------------------------------------"
-echo -e "${BOLD}[5] Certificate Expiration Audit${RESET}"
+echo -e "${BOLD}[6] Certificate Expiration Audit${RESET}"
 printf "%-12s %-30s %-40s %-30s\n" "EXPIRY-ISO" "NAMESPACE" "SECRET NAME" "STATUS"
 echo "------------------------------------------------------------------------------------------------------------------"
 TEMP_CERT_FILE=$(mktemp)
