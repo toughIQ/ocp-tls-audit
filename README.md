@@ -1,94 +1,100 @@
-# OpenShift Dynamic TLS & Certificate Audit
+# OpenShift Dynamic TLS & Risk Audit
 
 ![Platform](https://img.shields.io/badge/Platform-OpenShift%204.x-red)
 ![Language](https://img.shields.io/badge/Language-Bash-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**`ocp-tls-audit.sh`** is a comprehensive, robust bash script designed to audit the **actual** TLS security posture of a Red Hat OpenShift Container Platform (OCP) cluster.
+**`ocp-tls-audit.sh`** is a robust auditing tool designed to reveal the **actual** TLS security posture and runtime configuration of Red Hat OpenShift Container Platform (OCP) clusters.
 
-Unlike standard compliance tools that often only check the *desired state* (CRDs), this tool verifies the **active runtime configuration** (Live ConfigMaps, HAProxy settings, Node configs) to ensure that security profiles like `Modern`, `Intermediate`, or `Custom` are successfully applied and active.
+Unlike standard compliance tools that often only check the *desired state* (CRDs), this tool performs a **Risk Analysis** by verifying the **active runtime configuration** (Live ConfigMaps, HAProxy Runtime, Istio Handshakes) and rating them against cluster standards.
 
 ## 🚀 Key Features
 
-* **API Server Deep-Dive:**
-    * Checks configured TLS Profile vs. Active ConfigMap.
-    * Detects if a configuration rollout is pending.
-    * Lists the *exact* active Cipher Suites (critical for verifying hardened "Custom" profiles).
-* **Ingress Controller (Router) Verification:**
-    * Compares `spec` (Configuration) against `status` (Operator acknowledgment).
-    * Inspects running HAProxy pods to verify if TLS 1.3 is enforced (detects "Modern" profile application).
-    * Filters output to show relevant TLS options and active ciphers.
-* **Pool-Aware Kubelet Check:**
-    * Intelligently scans MachineConfigPools (e.g., `master` vs. `worker` vs. `gpu`).
-    * Detects if specific Node Pools have overriding `KubeletConfig` applied (e.g., generic Intermediate on Masters, but Legacy on Workers).
-* **Certificate Expiry Monitor:**
-    * Scans critical OpenShift namespaces (`openshift-ingress`, `kube-apiserver`, `etcd`, `monitoring`, etc.).
-    * Reports expiration dates and status (OK/EXPIRING/EXPIRED) for all TLS secrets.
-* **Dynamic Reference:**
-    * Fetches the official cipher definitions for `Old`, `Intermediate`, and `Modern` from the cluster's own API documentation (`oc explain`) to serve as a baseline comparison.
+* **Dual Audit Modes:**
+    * **Infrastructure Audit (Default):** Deep dive into Control Plane, API, Ingress, and System Certs.
+    * **User Workload Scan (`-u`):** Rapidly scans user namespaces for expiring application certificates, filtering out system noise.
+
+* **Dynamic Risk Analysis:**
+    * Identifies the **Highest Supported** protocol (Modernity Check).
+    * Probes for the **Weakest Allowed** protocol (Risk Check) to find the "weakest link".
+    * Rates findings as `[Modern]`, `[Intermediate]`, or `[Old/Legacy]`.
+
+* **Source of Truth Reference:**
+    * Dynamically fetches the official cipher definitions from the cluster's own API (`oc explain`).
+    * **Standard Alignment:** Strictly follows the **[Mozilla Server-Side TLS Guidelines](https://wiki.mozilla.org/Security/Server_Side_TLS)** (Red Hat Standard).
+
+* **Component Deep-Dive:**
+    * **API Server:** Validates active Ciphers and TLS versions against the profile.
+    * **Ingress Controller:** Dumps internal **HAProxy** config to verify runtime settings.
+    * **Service Mesh:** Performs active handshakes against Istio Gateways (Hybrid Audit).
+    * **Kubelet:** Detects insecure `KubeletConfig` overrides on Node Pools.
 
 ## 📋 Prerequisites
 
 * **Bash** shell (Linux/macOS/WSL)
-* **`oc`** CLI (logged into the target cluster with `cluster-admin` privileges)
+* **`oc`** CLI (logged into the target cluster)
 * **`jq`** (for JSON parsing)
-* **`openssl`** (for certificate date parsing)
+* **`openssl`** (for certificate checks)
+* **`timeout`** (coreutils)
 
 ## 🛠️ Usage
 
-1.  Clone this repository or download the script.
-2.  Make the script executable:
-    ```bash
-    chmod +x ocp-tls-audit.sh
-    ```
-3.  Run the audit:
-    ```bash
-    ./ocp-tls-audit.sh
-    ```
+1. Make the script executable:
 
-### Sample Output
+        chmod +x ocp-tls-audit.sh
 
-```text
-Starting OpenShift TLS Audit...
-Cluster: [https://api.example.com:6443](https://api.example.com:6443)
-Date: Fri Dec 12 16:30:00 CET 2025
------------------------------------------------------------------------------------
+2. **Mode A: Infrastructure Audit (Standard)**
+   Checks the security posture of the OpenShift Cluster itself (API, Ingress, Nodes).
 
-[1] Component: API Server
-  Configured Profile: Custom
-  Minimum TLS Version: VersionTLS12
-  Active Ciphers:
-    - ECDHE-ECDSA-AES128-GCM-SHA256
-    - ECDHE-RSA-AES128-GCM-SHA256
-    - ECDHE-ECDSA-AES256-GCM-SHA384
-    - ECDHE-RSA-AES256-GCM-SHA384
+        ./ocp-tls-audit.sh
 
-[2] Component: Ingress Controller
-  Controller Name: default
-  Profile (Spec & Status): Modern
-  TLS Options (HAProxy): ssl-min-ver TLSv1.3
-    (TLS 1.3 Suites):
-      - TLS_AES_128_GCM_SHA256
-      - TLS_AES_256_GCM_SHA384
-      - TLS_CHACHA20_POLY1305_SHA256
+3. **Mode B: User Workload Scan**
+   Scans only user-defined namespaces for expiring TLS secrets (ignoring `openshift-*`, `kube-*`, etc.).
 
-[3] Component: Kubelet (Node Pools)
-  Pool: master
-    Status: Intermediate (Default - Inherited)
-  Pool: worker
-    Status: Custom KubeletConfig Applied
-    Config Object: set-legacy-worker
-    Profile: Old
-...
-```
-## 📚 Background & References
+        ./ocp-tls-audit.sh -u
+        # OR
+        ./ocp-tls-audit.sh --user-certs
 
-OpenShift allows configuring TLS Security Profiles to balance between security and compatibility. This script helps verify these settings against industry standards.
+### Sample Output (Infrastructure Audit)
 
-* **Red Hat Documentation:** [Configuring TLS Security Profiles in OpenShift](https://docs.openshift.com/container-platform/4.17/security/tls-security-profiles.html)
-    * *Explains the CRD based configuration for APIServer, Ingress, and Kubelet.*
-* **Mozilla Security Guidelines:** [Server Side TLS](https://wiki.mozilla.org/Security/Server_Side_TLS)
-    * *The upstream source for the definitions of "Old", "Intermediate", and "Modern" profiles used by OpenShift.*
+    Starting OpenShift TLS Audit (Dynamic Security & Config Audit)...
+    Scan Scope: Infrastructure Audit (Deep Dive)
+    Cluster: https://api.example.com:6443
+    Version: 4.19.21
+    Date:    Thu Dec 18 20:45:00 CET 2025
+    -----------------------------------------------------------------------------------
+
+    [1] Component: API Server
+      Configured Profile: Intermediate (Default)
+      Minimum TLS Version: VersionTLS12
+      Active Ciphers:
+        - ECDHE-ECDSA-AES128-GCM-SHA256 [Intermediate]
+        - TLS_AES_256_GCM_SHA384 [Modern]
+        ...
+
+    [2] Component: Ingress Controller (Router)
+      Controller: default (Profile: Intermediate (Default))
+        Runtime Config: ssl-default-bind-options ssl-min-ver TLSv1.2
+        Active Ciphers (Runtime):
+          - TLS_AES_128_GCM_SHA256 [Modern]
+          ...
+
+    ... (Service Mesh & Kubelet Checks) ...
+
+    [6] Certificate Expiration Audit (Infrastructure Only)
+    Tip: Use -u to scan user workload certificates only.
+    EXPIRY        NAMESPACE/NAME                                      STATUS                        
+    ----------------------------------------------------------------------------------------------------
+    2026-01-11    openshift-kube-apiserver/aggregator-client          EXPIRING (23 d)
+    2028-12-10    openshift-etcd/etcd-client                          OK (1087 d)
+    ...
+
+## 🔗 Remediation & Configuration
+
+If the audit reveals "Old" or insecure profiles, you can modify the TLS Security Profiles for the Ingress Controller, API Server, or Kubelet.
+
+* **Official Red Hat Documentation:**
+    [Configuring TLS security profiles (OpenShift 4.20)](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/security_and_compliance/tls-security-profiles)
 
 ## 👨‍💻 Authors
 
